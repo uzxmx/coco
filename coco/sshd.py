@@ -9,9 +9,10 @@ import time
 
 import paramiko
 
-from coco.utils import ssh_key_gen, get_logger
+from coco.utils import ssh_key_gen, get_logger, parse_session_environment, get_asset_and_system_user_from_env
 from coco.interface import SSHInterface
 from coco.interactive import InteractiveServer
+from coco.non_interactive import NonInteractiveServer
 from coco.models import Connection
 from coco.sftp import SFTPServer
 from coco.conf import config
@@ -110,22 +111,38 @@ class SSHServer:
     def dispatch(client):
         supported = {'pty', 'x11', 'forward-agent'}
         chan_type = client.request.type
+        # Here request type may haven't been prepared because of async, and we just wait.
+        retries = 0
+        while not chan_type and retries < 10:
+            retries += 1
+            time.sleep(0.2 * retries)
+            chan_type = client.request.type
         kind = client.request.kind
         try:
-            if kind == 'session' and chan_type in supported:
-                logger.info("Dispatch client to interactive mode")
-                try:
-                    InteractiveServer(client).interact()
-                except IndexError as e:
-                    logger.error("Unexpected error occur: {}".format(e))
-            elif chan_type == 'subsystem':
+            if chan_type == 'subsystem':
                 while not client.closed:
                     time.sleep(5)
                 logger.debug("SFTP session finished")
             else:
-                msg = "Request type `{}:{}` not support now".format(kind, chan_type)
-                logger.error(msg)
-                client.send_unicode(msg)
+                # Here request meta env may haven't been prepared because of async.
+                options = parse_session_environment(client.request.meta['env'])
+                if kind == 'session' and chan_type in supported and options.get('Interactive') != 'no':
+                    logger.info("Dispatch client to interactive mode")
+                    try:
+                        InteractiveServer(client).interact()
+                    except IndexError as e:
+                        logger.error("Unexpected error occur: {}".format(e))
+                else:
+                    # Wait for env to be prepared.
+                    retries = 0
+                    while not options and retries < 10:
+                        retries += 1
+                        time.sleep(0.2 * retries)
+                        options = parse_session_environment(client.request.meta['env'])
+                    asset, su = get_asset_and_system_user_from_env(client, options)
+                    if not asset or not su:
+                        return
+                    NonInteractiveServer(client, asset, su).handle()
         finally:
             connection = Connection.get_connection(client.connection_id)
             if connection:

@@ -7,7 +7,7 @@ from functools import wraps
 from paramiko.sftp import SFTP_PERMISSION_DENIED, SFTP_NO_SUCH_FILE, \
     SFTP_FAILURE, SFTP_EOF, SFTP_CONNECTION_LOST
 
-from coco.utils import get_logger
+from coco.utils import get_logger, parse_session_environment, get_asset_and_system_user_from_env
 from .conf import config
 from .service import app_service
 from .connection import SSHConnection
@@ -69,6 +69,12 @@ class SFTPServer(paramiko.SFTPServerInterface):
         self.hosts = self.get_permed_hosts()
         self.is_finished = False
 
+        client = list(self.server.connection.clients.values())[0]
+        options = parse_session_environment(client.request.meta['env'])
+        self.interactive = options.get('Interactive') != "no"
+        if not self.interactive:
+            self.asset, self.su = get_asset_and_system_user_from_env(client, options)
+
     def get_permed_hosts(self):
         hosts = {}
         assets = app_service.get_user_assets(
@@ -108,8 +114,12 @@ class SFTPServer(paramiko.SFTPServerInterface):
         self._sftp = {}
 
     def get_host_sftp(self, host, su):
-        asset = self.hosts.get(host)['asset']
-        system_user = self.get_host_system_users(host, only_name=False).get(su)
+        if self.interactive:
+            asset = self.hosts.get(host)['asset']
+            system_user = self.get_host_system_users(host, only_name=False).get(su)
+        else:
+            asset = self.asset
+            system_user = self.su
 
         if not asset or not system_user:
             raise PermissionError("No asset or system user explicit")
@@ -141,21 +151,24 @@ class SFTPServer(paramiko.SFTPServerInterface):
         return unique, su
 
     def parse_path(self, path):
-        data = path.lstrip('/').split('/')
-        request = {"host": "", "su": "", "dpath": "", "su_unique": False}
+        if self.interactive:
+            data = path.lstrip('/').split('/')
+            request = {"host": "", "su": "", "dpath": "", "su_unique": False}
 
-        if len(data) == 1 and not data[0]:
-            return request
+            if len(data) == 1 and not data[0]:
+                return request
 
-        host, path = data[0], data[1:]
-        request["host"] = host
-        unique, su = self.host_has_unique_su(host)
-        if unique:
-            request['su'] = su
-            request['su_unique'] = True
+            host, path = data[0], data[1:]
+            request["host"] = host
+            unique, su = self.host_has_unique_su(host)
+            if unique:
+                request['su'] = su
+                request['su_unique'] = True
+            else:
+                request['su'], path = (path[0], path[1:]) if path else ('', path)
+            request['dpath'] = '/'.join(path)
         else:
-            request['su'], path = (path[0], path[1:]) if path else ('', path)
-        request['dpath'] = '/'.join(path)
+            request = { "host": self.asset.hostname, "su": self.su.username, "dpath": path, "su_unique": True }
         return request
 
     def get_sftp_client_rpath(self, request):
@@ -164,11 +177,14 @@ class SFTPServer(paramiko.SFTPServerInterface):
         host, su, dpath = request['host'], request['su'], request['dpath']
         if host and su:
             sftp = self.get_host_sftp(host, su)
-            if self.root.lower() in ['~', 'home']:
-                root = sftp['home']
+            if self.interactive:
+                if self.root.lower() in ['~', 'home']:
+                    root = sftp['home']
+                else:
+                    root = self.root
+                rpath = os.path.join(root, dpath.lstrip('/'))
             else:
-                root = self.root
-            rpath = os.path.join(root, dpath.lstrip('/'))
+                rpath = dpath
             return sftp['client'], rpath
         else:
             raise FileNotFoundError()
@@ -190,7 +206,8 @@ class SFTPServer(paramiko.SFTPServerInterface):
             "user": self.server.connection.user.username,
             "asset": host,
             "org_id": asset.org_id,
-            "system_user": su,
+            # TODO The following line will cause non-interactive SFTP not working
+            # "system_user": su,
             "remote_addr": self.server.connection.addr[0],
             "operate": operate,
             "filename": filename or rpath,

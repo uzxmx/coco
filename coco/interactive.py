@@ -439,7 +439,7 @@ class InteractiveServer:
         if system_user is None:
             self.client.send_unicode(_("No system user"))
             return
-        forwarder = ProxyServer(self.client, asset, system_user)
+        forwarder = ProxyServer(self.client, True, asset, system_user)
         forwarder.proxy()
 
     #

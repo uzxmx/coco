@@ -5,6 +5,11 @@
 import threading
 import time
 
+try:
+    import selectors
+except ImportError:
+    import selectors2 as selectors
+
 from .session import Session
 from .models import Server, TelnetServer
 from .connection import SSHConnection, TelnetConnection
@@ -21,8 +26,9 @@ AUTO_LOGIN = 'auto'
 
 
 class ProxyServer:
-    def __init__(self, client, asset, system_user):
+    def __init__(self, client, interactive, asset, system_user):
         self.client = client
+        self.interactive = interactive
         self.asset = asset
         self.system_user = system_user
         self.server = None
@@ -71,22 +77,70 @@ class ProxyServer:
         if self.client.closed:
             self.server.close()
             return
-        session = Session.new_session(self.client, self.server)
-        if not session:
-            msg = _("Connect with api server failed")
-            logger.error(msg)
-            self.client.send_unicode(msg)
-            self.server.close()
 
-        try:
-            session.bridge()
-        finally:
-            Session.remove_session(session.id)
-            self.server.close()
-            msg = 'Session end, total {} now'.format(
-                len(Session.sessions),
-            )
-            logger.info(msg)
+        if self.interactive:
+            session = Session.new_session(self.client, self.server)
+            if not session:
+                msg = _("Connect with api server failed")
+                logger.error(msg)
+                self.client.send_unicode(msg)
+                self.server.close()
+
+            try:
+                session.bridge()
+            finally:
+                Session.remove_session(session.id)
+                self.server.close()
+                msg = 'Session end, total {} now'.format(
+                    len(Session.sessions),
+                )
+                logger.info(msg)
+        else:
+            try:
+                client = self.client
+                server = self.server
+                chan = server.chan
+                chan.exec_command(client.request.meta['command'])
+                sel = selectors.DefaultSelector()
+                sel.register(client, selectors.EVENT_READ)
+                sel.register(chan, selectors.EVENT_READ)
+                finished = False
+                while not finished:
+                    events = sel.select(timeout=60)
+                    for sock in [key.fileobj for key, _ in events]:
+                        data = sock.recv(1024)
+                        if sock == client:
+                            if len(data) > 0:
+                                server.send(data)
+                            else:
+                                sel.unregister(client)
+                                chan.shutdown_write()
+                        elif sock == chan:
+                            # The data may come from stdout or stderr, it's not easy to distinguish, so here
+                            # we just send the data to client stdout.
+                            if len(data) > 0:
+                                client.send(data)
+                            else:
+                                sel.unregister(chan)
+                                finished = True
+                                # Drain stdout/stderr stream.
+                                while True:
+                                    data = chan.recv(1024)
+                                    if len(data) > 0:
+                                        client.send(data)
+                                    else:
+                                        break
+                                while True:
+                                    data = chan.recv_stderr(1024)
+                                    if len(data) > 0:
+                                        client.send(data)
+                                    else:
+                                        break
+                                break
+
+                client.chan.send_exit_status(chan.recv_exit_status())
+            finally:
+                self.server.close()
 
     def validate_permission(self):
         """
@@ -99,7 +153,8 @@ class ProxyServer:
 
     def get_server_conn(self):
         logger.info("Connect to {}:{} ...".format(self.asset.hostname, self.asset.port))
-        self.send_connecting_message()
+        if self.interactive:
+            self.send_connecting_message()
         if not self.validate_permission():
             self.client.send_unicode(warning(_('No permission')))
             server = None
@@ -109,7 +164,8 @@ class ProxyServer:
             server = self.get_ssh_server_conn()
         else:
             server = None
-        self.client.send(b'\r\n')
+        if self.interactive:
+            self.client.send(b'\r\n')
         self.connecting = False
         return server
 
@@ -124,21 +180,24 @@ class ProxyServer:
         return server
 
     def get_ssh_server_conn(self):
-        request = self.client.request
-        term = request.meta.get('term', 'xterm')
-        width = request.meta.get('width', 80)
-        height = request.meta.get('height', 24)
         ssh = SSHConnection()
-        chan, sock, msg = ssh.get_channel(
-            self.asset, self.system_user, term=term,
-            width=width, height=height
-        )
-        if not chan:
-            self.client.send_unicode(warning(wr(msg, before=1, after=0)))
-            server = None
+        if self.interactive:
+            request = self.client.request
+            term = request.meta.get('term', 'xterm')
+            width = request.meta.get('width', 80)
+            height = request.meta.get('height', 24)
+            chan, sock, msg = ssh.get_channel(
+                self.asset, self.system_user, term=term,
+                width=width, height=height
+            )
         else:
-            server = Server(chan, sock, self.asset, self.system_user)
-        return server
+            transport, sock, msg = ssh.get_transport(self.asset, self.system_user)
+            chan = transport.open_session()
+
+        if chan:
+            return Server(chan, sock, self.asset, self.system_user)
+        else:
+            self.client.send_unicode(warning(wr(msg, before=1, after=0)))
 
     def send_connecting_message(self):
         @ignore_error

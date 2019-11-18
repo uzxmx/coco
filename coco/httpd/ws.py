@@ -80,7 +80,7 @@ class ProxyNamespace(BaseNamespace):
 
         if not asset or not system_user:
             return
-        forwarder = ProxyServer(client, asset, system_user)
+        forwarder = ProxyServer(client, True, asset, system_user)
 
         def proxy():
             try:

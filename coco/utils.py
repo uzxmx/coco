@@ -19,6 +19,7 @@ import pyte
 
 from . import char
 from .conf import config
+from .service import app_service
 
 BASE_DIR = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
 
@@ -473,3 +474,49 @@ def gzip_file(src_path, dst_path, unlink_ori=True):
 
 
 ugettext = LocalProxy(partial(_find, 'LANGUAGE_CODE'))
+
+def parse_session_environment(env):
+    d = {}
+    for key, value in env.items():
+        key = key.decode('utf-8')
+        if key in ('Interactive', 'AssetName', 'SystemUserName'):
+            d[key] = value.decode('utf-8')
+    return d
+
+def get_asset_and_system_user_from_env(client, env):
+    asset = None
+    system_user = None
+
+    asset_name = env.get('AssetName')
+    if not asset_name:
+        client.send_unicode('Environment variable `AssetName` must be provided for non-interactive mode')
+        return asset, system_user
+
+    for a in app_service.get_user_assets(client.user):
+        if a.hostname == asset_name:
+            asset = a
+            break
+
+    if not asset:
+        client.send_unicode('Cannot find asset with name `{}`'.format(asset_name))
+        return asset, system_user
+
+    system_users = asset.system_users_granted
+    if len(system_users) == 1:
+        system_user = asset.system_users_granted[0]
+    elif len(system_users) > 1:
+        system_user_name = env.get('SystemUserName')
+        if system_user_name:
+            for su in system_users:
+                if su.username == system_user_name:
+                    system_user = su
+                    break
+
+            if not system_user:
+                client.send_unicode('Cannot find system user with name `{}`'.format(system_user_name))
+        else:
+            system_user = system_users[0]
+    else:
+        client.send_unicode('List of system users is empty')
+
+    return asset, system_user
