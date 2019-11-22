@@ -165,7 +165,8 @@ class SSHInterface(paramiko.ServerInterface):
         logger.debug("Check channel env request: %s, %s, %s" %
                      (channel.get_id(), name, value))
         client = self.connection.get_client(channel)
-        client.request.meta['env'][name] = value
+        if client:
+            client.request.meta['env'][name] = value
         return False
 
     def check_channel_exec_request(self, channel, command):
