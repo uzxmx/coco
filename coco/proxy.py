@@ -17,6 +17,7 @@ from .service import app_service
 from .conf import config
 from .utils import wrap_with_line_feed as wr, wrap_with_warning as warning, \
      get_logger, net_input, ugettext as _, ignore_error
+from .agent import AgentRequestHandler
 
 
 logger = get_logger(__file__)
@@ -181,23 +182,24 @@ class ProxyServer:
 
     def get_ssh_server_conn(self):
         ssh = SSHConnection()
+        transport, sock, msg = ssh.get_transport(self.asset, self.system_user)
+        chan = transport.open_session()
+        if not chan:
+            self.client.send_unicode(warning(wr(msg, before=1, after=0)))
+            return
+
+        if self.client.forward_agent:
+            AgentRequestHandler(chan, self.client.chan)
+
         if self.interactive:
             request = self.client.request
             term = request.meta.get('term', 'xterm')
             width = request.meta.get('width', 80)
             height = request.meta.get('height', 24)
-            chan, sock, msg = ssh.get_channel(
-                self.asset, self.system_user, term=term,
-                width=width, height=height
-            )
-        else:
-            transport, sock, msg = ssh.get_transport(self.asset, self.system_user)
-            chan = transport.open_session()
+            chan.get_pty(term, width, height, 0, 0)
+            chan.invoke_shell()
 
-        if chan:
-            return Server(chan, sock, self.asset, self.system_user)
-        else:
-            self.client.send_unicode(warning(wr(msg, before=1, after=0)))
+        return Server(chan, sock, self.asset, self.system_user)
 
     def send_connecting_message(self):
         @ignore_error

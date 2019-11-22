@@ -28,6 +28,7 @@ class Connection(object):
         self.user = None
         self.otp_auth = False
         self.login_from = 'ST'
+        self.forward_agent = False
         self.clients = {}
 
     def __str__(self):
@@ -136,6 +137,10 @@ class Client(object):
     @property
     def closed(self):
         return self.chan.closed
+
+    @property
+    def forward_agent(self):
+        return Connection.get_connection(self.connection_id).forward_agent
 
     def recv(self, size):
         return self.chan.recv(size)

@@ -182,6 +182,7 @@ class SSHInterface(paramiko.ServerInterface):
         logger.debug("Check channel forward agent request: %s" % channel)
         client = self.connection.get_client(channel)
         client.request.meta['forward-agent'] = True
+        self.connection.forward_agent = True
         self.event.set()
         return True
 
